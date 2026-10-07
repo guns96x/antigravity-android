@@ -1,6 +1,7 @@
 package com.antigravity.mobile
 
 import android.net.Uri
+import android.os.Message
 import android.webkit.ValueCallback
 import android.webkit.WebChromeClient
 import android.webkit.WebView
@@ -8,7 +9,9 @@ import android.webkit.WebView
 class AntigravityWebChromeClient(
     private val onProgressChange: (Int) -> Unit,
     private val onTitleChange: (String) -> Unit,
-    private val onFileChooser: (ValueCallback<Array<Uri>>?, FileChooserParams?) -> Boolean
+    private val onFileChooser: (ValueCallback<Array<Uri>>?, FileChooserParams?) -> Boolean,
+    private val onCreateWindowCallback: ((WebView?, Boolean, Boolean, Message?) -> Boolean)? = null,
+    private val onCloseWindowCallback: ((WebView?) -> Unit)? = null
 ) : WebChromeClient() {
 
     override fun onProgressChanged(view: WebView?, newProgress: Int) {
@@ -29,5 +32,20 @@ class AntigravityWebChromeClient(
         fileChooserParams: FileChooserParams?
     ): Boolean {
         return onFileChooser(filePathCallback, fileChooserParams)
+    }
+
+    override fun onCreateWindow(
+        view: WebView?,
+        isDialog: Boolean,
+        isUserGesture: Boolean,
+        resultMsg: Message?
+    ): Boolean {
+        return onCreateWindowCallback?.invoke(view, isDialog, isUserGesture, resultMsg)
+            ?: super.onCreateWindow(view, isDialog, isUserGesture, resultMsg)
+    }
+
+    override fun onCloseWindow(window: WebView?) {
+        super.onCloseWindow(window)
+        onCloseWindowCallback?.invoke(window)
     }
 }

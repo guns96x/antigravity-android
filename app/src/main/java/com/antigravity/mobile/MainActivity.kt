@@ -1,14 +1,30 @@
 package com.antigravity.mobile
 
+import android.annotation.SuppressLint
 import android.app.Activity
+import android.app.Dialog
+import android.content.Intent
+import android.graphics.Bitmap
+import android.net.Uri
 import android.os.Bundle
+import android.os.Message
+import android.view.ViewGroup
 import android.view.WindowManager
+import android.webkit.CookieManager
+import android.webkit.ValueCallback
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -23,13 +39,20 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.viewinterop.AndroidView
 
 class MainActivity : ComponentActivity() {
 
-    private var onAccountSelectedCallback: ((String) -> Unit)? = null
+    private var filePathCallback: ValueCallback<Array<Uri>>? = null
+
+    companion object {
+        const val MOBILE_USER_AGENT =
+            "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
+        const val DESKTOP_USER_AGENT =
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -38,7 +61,7 @@ class MainActivity : ComponentActivity() {
         val prefs = PreferencesManager(this)
 
         setContent {
-            GoogleAntigravityHub(
+            InAppAntigravityScreen(
                 prefs = prefs,
                 onSetKeepScreenOn = { keepOn ->
                     if (keepOn) {
@@ -47,75 +70,79 @@ class MainActivity : ComponentActivity() {
                         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                     }
                 },
-                onPickAccountFromDevice = { onSelected ->
-                    onAccountSelectedCallback = onSelected
-                    try {
-                        val pickIntent = AccountPickerHelper.createChooseAccountIntent(prefs.preferredEmail)
-                        accountPickerLauncher.launch(pickIntent)
-                    } catch (e: Exception) {
-                        Toast.makeText(this, "Помилка виклику вибору акаунта: ${e.message}", Toast.LENGTH_SHORT).show()
+                onOpenFileChooser = { callback, params ->
+                    filePathCallback?.onReceiveValue(null)
+                    filePathCallback = callback
+                    val intent = params?.createIntent() ?: Intent(Intent.ACTION_GET_CONTENT).apply {
+                        type = "*/*"
+                        addCategory(Intent.CATEGORY_OPENABLE)
                     }
-                },
-                onLaunchSession = {
-                    CustomTabLauncher.launchAntigravity(
-                        context = this,
-                        baseUrl = prefs.canonicalUrl,
-                        email = prefs.preferredEmail,
-                        authUserIndex = prefs.authUserIndex
-                    )
+                    filePickerLauncher.launch(intent)
+                    true
                 }
             )
         }
     }
 
-    private val accountPickerLauncher = registerForActivityResult(
+    override fun onPause() {
+        super.onPause()
+        CookieManager.getInstance().flush()
+    }
+
+    private val filePickerLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
         if (result.resultCode == Activity.RESULT_OK) {
-            val email = result.data?.getStringExtra(android.accounts.AccountManager.KEY_ACCOUNT_NAME)
-            if (!email.isNullOrBlank()) {
-                onAccountSelectedCallback?.invoke(email)
-                Toast.makeText(this, "Акаунт підхоплено: $email", Toast.LENGTH_SHORT).show()
-            }
+            val intent = result.data
+            val results = WebChromeClient.FileChooserParams.parseResult(result.resultCode, intent)
+            filePathCallback?.onReceiveValue(results)
+        } else {
+            filePathCallback?.onReceiveValue(null)
         }
-        onAccountSelectedCallback = null
+        filePathCallback = null
     }
 }
 
+@SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun GoogleAntigravityHub(
+fun InAppAntigravityScreen(
     prefs: PreferencesManager,
     onSetKeepScreenOn: (Boolean) -> Unit,
-    onPickAccountFromDevice: (((String) -> Unit) -> Unit),
-    onLaunchSession: () -> Unit
+    onOpenFileChooser: (ValueCallback<Array<Uri>>?, WebChromeClient.FileChooserParams?) -> Boolean
 ) {
     val context = LocalContext.current
-    var preferredEmail by remember { mutableStateOf(prefs.preferredEmail) }
-    var authUserIndex by remember { mutableIntStateOf(prefs.authUserIndex) }
-    var autoLaunch by remember { mutableStateOf(prefs.autoLaunchOnOpen) }
+    var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var progress by remember { mutableIntStateOf(0) }
+    var isDesktopMode by remember { mutableStateOf(prefs.isDesktopMode) }
     var keepScreenAwake by remember { mutableStateOf(prefs.keepScreenAwake) }
-    var showAccountDialog by remember { mutableStateOf(false) }
+    var isControlsExpanded by remember { mutableStateOf(false) }
+    var showSettingsDialog by remember { mutableStateOf(false) }
+    var backPressedOnce by remember { mutableStateOf(false) }
 
     LaunchedEffect(keepScreenAwake) {
         onSetKeepScreenOn(keepScreenAwake)
     }
 
-    // Auto launch if enabled
-    LaunchedEffect(Unit) {
-        if (autoLaunch) {
-            onLaunchSession()
+    // Hardware back button: navigate history in WebView first
+    BackHandler {
+        val wv = webViewRef
+        if (wv != null && wv.canGoBack()) {
+            wv.goBack()
+        } else {
+            if (backPressedOnce) {
+                (context as? Activity)?.finish()
+            } else {
+                backPressedOnce = true
+                Toast.makeText(context, "Натисніть назад ще раз для виходу", Toast.LENGTH_SHORT).show()
+            }
         }
     }
 
-    // First run: prompt system account picker if empty
-    LaunchedEffect(Unit) {
-        if (preferredEmail.isBlank() && !prefs.hasPromptedAccountPicker) {
-            prefs.hasPromptedAccountPicker = true
-            onPickAccountFromDevice { picked ->
-                preferredEmail = picked
-                prefs.preferredEmail = picked
-            }
+    LaunchedEffect(backPressedOnce) {
+        if (backPressedOnce) {
+            kotlinx.coroutines.delay(2000)
+            backPressedOnce = false
         }
     }
 
@@ -124,304 +151,308 @@ fun GoogleAntigravityHub(
         containerColor = Color(0xFF0F1117),
         contentWindowInsets = WindowInsets.statusBars
     ) { innerPadding ->
-        Column(
+        Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .windowInsetsPadding(WindowInsets.navigationBars)
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // Google App Top Bar
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 8.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(36.dp)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0xFF1A73E8)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("▲", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            // Main In-App WebView
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        layoutParams = ViewGroup.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.MATCH_PARENT
+                        )
+
+                        settings.apply {
+                            javaScriptEnabled = true
+                            domStorageEnabled = true
+                            databaseEnabled = true
+                            useWideViewPort = true
+                            loadWithOverviewMode = true
+                            builtInZoomControls = true
+                            displayZoomControls = false
+                            mediaPlaybackRequiresUserGesture = false
+                            mixedContentMode = WebSettings.MIXED_CONTENT_NEVER_ALLOW
+                            setSupportMultipleWindows(true)
+                            javaScriptCanOpenWindowsAutomatically = true
+
+                            userAgentString = if (isDesktopMode) {
+                                MainActivity.DESKTOP_USER_AGENT
+                            } else {
+                                MainActivity.MOBILE_USER_AGENT
+                            }
+                        }
+
+                        val cookieManager = CookieManager.getInstance()
+                        cookieManager.setAcceptCookie(true)
+                        cookieManager.setAcceptThirdPartyCookies(this, true)
+
+                        webViewClient = AntigravityWebViewClient(
+                            context = ctx,
+                            onPageStartedCallback = {},
+                            onPageFinishedCallback = { _ -> },
+                            onErrorCallback = { _ -> },
+                            onRendererCrashCallback = { reload() }
+                        )
+
+                        webChromeClient = AntigravityWebChromeClient(
+                            onProgressChange = { p -> progress = p },
+                            onTitleChange = { _ -> },
+                            onFileChooser = onOpenFileChooser,
+                            onCreateWindowCallback = { parentView, isDialog, isUserGesture, resultMsg ->
+                                handlePopupLoginWindow(ctx, parentView, resultMsg)
+                            },
+                            onCloseWindowCallback = { _ -> }
+                        )
+
+                        loadUrl(prefs.canonicalUrl)
+                        webViewRef = this
                     }
-                    Text(
-                        text = "Antigravity",
-                        color = Color.White,
-                        fontSize = 20.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
+                },
+                update = { wv ->
+                    val expectedAgent = if (isDesktopMode) {
+                        MainActivity.DESKTOP_USER_AGENT
+                    } else {
+                        MainActivity.MOBILE_USER_AGENT
+                    }
+                    if (wv.settings.userAgentString != expectedAgent) {
+                        wv.settings.userAgentString = expectedAgent
+                        wv.reload()
+                    }
                 }
+            )
 
-                // Google Avatar circle in top-right (standard Google app pattern)
-                val initial = if (preferredEmail.isNotBlank()) {
-                    preferredEmail.first().uppercase()
-                } else "G"
-
-                Box(
+            // Top progress bar (Google Blue line)
+            if (progress in 1..99) {
+                LinearProgressIndicator(
+                    progress = { progress / 100f },
                     modifier = Modifier
-                        .size(40.dp)
-                        .clip(CircleShape)
-                        .background(Color(0xFF2563EB))
-                        .border(1.5.dp, Color(0xFF60A5FA), CircleShape)
-                        .clickable { showAccountDialog = true },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Text(
-                        text = initial,
-                        color = Color.White,
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp
-                    )
-                }
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .align(Alignment.TopCenter),
+                    color = Color(0xFF1A73E8),
+                    trackColor = Color.Transparent
+                )
             }
 
-            // Hero Card
-            Card(
+            // Minimal floating quick action menu (bottom-end pill)
+            Box(
                 modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 12.dp),
-                shape = RoundedCornerShape(24.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF181B22)),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF262C36))
+                    .align(Alignment.BottomEnd)
+                    .windowInsetsPadding(WindowInsets.navigationBars)
+                    .padding(end = 16.dp, bottom = 16.dp)
             ) {
-                Column(
-                    modifier = Modifier.padding(24.dp),
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .size(64.dp)
-                            .clip(CircleShape)
-                            .background(Color(0xFF1A73E8).copy(alpha = 0.15f)),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text("🚀", fontSize = 28.sp)
-                    }
-
-                    Text(
-                        text = "Google Antigravity",
-                        color = Color.White,
-                        fontSize = 22.sp,
-                        fontWeight = FontWeight.Bold
-                    )
-
-                    Text(
-                        text = "Повноцінна сесія через захищений Google Chrome із системним профілем та без циклу вибору акаунта.",
-                        color = Color(0xFF9CA3AF),
-                        fontSize = 13.sp,
-                        textAlign = TextAlign.Center,
-                        lineHeight = 18.sp
-                    )
-
-                    // Account pill
-                    Surface(
+                if (isControlsExpanded) {
+                    Card(
                         shape = RoundedCornerShape(20.dp),
-                        color = Color(0xFF202530),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF323B4A)),
-                        modifier = Modifier.clickable { showAccountDialog = true }
+                        colors = CardDefaults.cardColors(containerColor = Color(0xFF1F2430)),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF2E3440)),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 8.dp)
                     ) {
                         Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text("👤", fontSize = 12.sp)
-                            Text(
-                                text = if (preferredEmail.isNotBlank()) preferredEmail else "authuser=$authUserIndex (перший акаунт)",
-                                color = Color(0xFF93C5FD),
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.Medium
-                            )
+                            // Home
+                            IconButton(onClick = {
+                                webViewRef?.loadUrl(prefs.canonicalUrl)
+                                isControlsExpanded = false
+                            }) {
+                                Text("🏠", fontSize = 16.sp)
+                            }
+
+                            // Reload
+                            IconButton(onClick = {
+                                webViewRef?.reload()
+                                isControlsExpanded = false
+                            }) {
+                                Text("🔄", fontSize = 16.sp)
+                            }
+
+                            // Desktop toggle
+                            IconButton(onClick = {
+                                isDesktopMode = !isDesktopMode
+                                prefs.isDesktopMode = isDesktopMode
+                                isControlsExpanded = false
+                            }) {
+                                Text(if (isDesktopMode) "📱" else "💻", fontSize = 16.sp)
+                            }
+
+                            // Screen awake
+                            IconButton(onClick = {
+                                keepScreenAwake = !keepScreenAwake
+                                prefs.keepScreenAwake = keepScreenAwake
+                            }) {
+                                Text(if (keepScreenAwake) "☀️" else "🌙", fontSize = 16.sp)
+                            }
+
+                            // Settings / Clear session
+                            IconButton(onClick = {
+                                showSettingsDialog = true
+                                isControlsExpanded = false
+                            }) {
+                                Text("⚙️", fontSize = 16.sp)
+                            }
+
+                            // Close pill
+                            IconButton(onClick = { isControlsExpanded = false }) {
+                                Text("✕", fontSize = 14.sp, color = Color(0xFF9CA3AF))
+                            }
                         }
                     }
-
-                    Spacer(modifier = Modifier.height(4.dp))
-
-                    // Primary launch button
-                    Button(
-                        onClick = onLaunchSession,
-                        shape = RoundedCornerShape(16.dp),
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A73E8)),
+                } else {
+                    Box(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .height(54.dp)
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .background(Color(0xFF1F2430).copy(alpha = 0.85f))
+                            .border(1.dp, Color(0xFF374151), CircleShape)
+                            .clickable { isControlsExpanded = true },
+                        contentAlignment = Alignment.Center
                     ) {
-                        Text(
-                            text = "Увійти в Antigravity",
-                            color = Color.White,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Bold
-                        )
+                        Text("⚡", fontSize = 16.sp)
                     }
                 }
             }
-
-            // Quick Preferences Card
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(20.dp),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF181B22)),
-                border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF262C36))
-            ) {
-                Column(
-                    modifier = Modifier.padding(18.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Швидкий запуск", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                            Text("Відкривати сесію одразу при старті", color = Color(0xFF9CA3AF), fontSize = 12.sp)
-                        }
-                        Switch(
-                            checked = autoLaunch,
-                            onCheckedChange = {
-                                autoLaunch = it
-                                prefs.autoLaunchOnOpen = it
-                            }
-                        )
-                    }
-
-                    HorizontalDivider(color = Color(0xFF262C36))
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text("Не вимикати екран", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                            Text("Тримати екран увімкненим для моніторингу", color = Color(0xFF9CA3AF), fontSize = 12.sp)
-                        }
-                        Switch(
-                            checked = keepScreenAwake,
-                            onCheckedChange = {
-                                keepScreenAwake = it
-                                prefs.keepScreenAwake = it
-                            }
-                        )
-                    }
-                }
-            }
-
-            // Footer info
-            Text(
-                text = "Працює на базі Google Chrome Custom Tabs з нативною сесією",
-                color = Color(0xFF6B7280),
-                fontSize = 11.sp,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 6.dp)
-            )
         }
     }
 
-    // Google Account Switcher Dialog (like in Google Apps)
-    if (showAccountDialog) {
-        var emailInput by remember { mutableStateOf(preferredEmail) }
-        var selectedAuthIndex by remember { mutableIntStateOf(authUserIndex) }
+    // Settings Modal
+    if (showSettingsDialog) {
+        var urlInput by remember { mutableStateOf(prefs.canonicalUrl) }
 
         AlertDialog(
-            onDismissRequest = { showAccountDialog = false },
+            onDismissRequest = { showSettingsDialog = false },
             title = {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Text("Google", color = Color(0xFF4285F4), fontWeight = FontWeight.Bold, fontSize = 20.sp)
-                    Text("Обліковий запис", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                }
+                Text(
+                    text = "Налаштування Antigravity",
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 18.sp,
+                    color = Color.White
+                )
             },
             text = {
                 Column(
                     modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
                 ) {
-                    Text(
-                        text = "Оберіть, під яким акаунтом заходити в Antigravity. Завдяки параметру authuser Google відкриває цей профіль без AccountChooser.",
-                        fontSize = 12.sp,
-                        color = Color(0xFF9CA3AF),
-                        lineHeight = 16.sp
-                    )
-
-                    // Button to pick account directly from device system accounts
-                    Button(
-                        onClick = {
-                            onPickAccountFromDevice { picked ->
-                                emailInput = picked
-                                preferredEmail = picked
-                                prefs.preferredEmail = picked
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF3B82F6)),
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("📱 Підхопити акаунт з телефона", color = Color(0xFF60A5FA), fontWeight = FontWeight.SemiBold)
-                    }
-
                     OutlinedTextField(
-                        value = emailInput,
-                        onValueChange = { emailInput = it },
-                        label = { Text("Email акаунта") },
-                        placeholder = { Text("ваша.пошта@gmail.com") },
+                        value = urlInput,
+                        onValueChange = { urlInput = it },
+                        label = { Text("Канонічна URL адреса") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
 
-                    Text("Або номер профілю в браузері (authuser):", color = Color(0xFFD1D5DB), fontSize = 13.sp)
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    Button(
+                        onClick = {
+                            val cm = CookieManager.getInstance()
+                            cm.removeAllCookies {
+                                cm.flush()
+                                webViewRef?.clearCache(true)
+                                webViewRef?.clearHistory()
+                                webViewRef?.loadUrl(prefs.canonicalUrl)
+                                Toast.makeText(context, "Cookies та сесію очищено", Toast.LENGTH_SHORT).show()
+                                showSettingsDialog = false
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFDC2626)),
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        listOf(0, 1, 2).forEach { index ->
-                            FilterChip(
-                                selected = selectedAuthIndex == index,
-                                onClick = { selectedAuthIndex = index },
-                                label = { Text("authuser=$index") },
-                                colors = FilterChipDefaults.filterChipColors(
-                                    selectedContainerColor = Color(0xFF1A73E8),
-                                    selectedLabelColor = Color.White
-                                )
-                            )
-                        }
+                        Text("Очистити сесію та Cookies", color = Color.White)
                     }
                 }
             },
             confirmButton = {
                 TextButton(onClick = {
-                    preferredEmail = emailInput.trim()
-                    authUserIndex = selectedAuthIndex
-                    prefs.preferredEmail = preferredEmail
-                    prefs.authUserIndex = authUserIndex
-                    showAccountDialog = false
-                    Toast.makeText(context, "Налаштування акаунта збережено", Toast.LENGTH_SHORT).show()
+                    prefs.canonicalUrl = urlInput.ifBlank { PreferencesManager.DEFAULT_URL }
+                    showSettingsDialog = false
+                    Toast.makeText(context, "Збережено", Toast.LENGTH_SHORT).show()
                 }) {
                     Text("Зберегти", color = Color(0xFF1A73E8), fontWeight = FontWeight.Bold)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showAccountDialog = false }) {
+                TextButton(onClick = { showSettingsDialog = false }) {
                     Text("Закрити", color = Color(0xFF9CA3AF))
                 }
             },
             containerColor = Color(0xFF181B22)
         )
     }
+}
+
+/**
+ * Handles popup windows (e.g. Google Sign-In "Sign in with Google" popups)
+ * by displaying an in-app dialog with a child WebView instead of breaking out to a browser.
+ */
+@SuppressLint("SetJavaScriptEnabled")
+private fun handlePopupLoginWindow(
+    context: android.content.Context,
+    parentWebView: WebView?,
+    resultMsg: Message?
+): Boolean {
+    if (resultMsg == null) return false
+
+    val dialog = Dialog(context, android.R.style.Theme_DeviceDefault_NoActionBar_Fullscreen)
+    val popupWebView = WebView(context).apply {
+        layoutParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT
+        )
+
+        settings.apply {
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            databaseEnabled = true
+            useWideViewPort = true
+            loadWithOverviewMode = true
+            userAgentString = MainActivity.MOBILE_USER_AGENT
+        }
+
+        val cm = CookieManager.getInstance()
+        cm.setAcceptCookie(true)
+        cm.setAcceptThirdPartyCookies(this, true)
+
+        webViewClient = object : WebViewClient() {
+            override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
+                val url = request?.url?.toString() ?: ""
+                // When auth redirects back to Antigravity, close popup and load in main view
+                if (url.contains("antigravity.google")) {
+                    parentWebView?.loadUrl(url)
+                    dialog.dismiss()
+                    return true
+                }
+                return false
+            }
+
+            override fun onPageFinished(view: WebView?, url: String?) {
+                super.onPageFinished(view, url)
+                CookieManager.getInstance().flush()
+            }
+        }
+
+        webChromeClient = object : WebChromeClient() {
+            override fun onCloseWindow(window: WebView?) {
+                dialog.dismiss()
+                parentWebView?.reload()
+            }
+        }
+    }
+
+    dialog.setContentView(popupWebView)
+    dialog.setOnDismissListener {
+        popupWebView.destroy()
+        parentWebView?.reload()
+    }
+    dialog.show()
+
+    val transport = resultMsg.obj as? WebView.WebViewTransport
+    transport?.webView = popupWebView
+    resultMsg.sendToTarget()
+    return true
 }

@@ -14,7 +14,6 @@ import java.util.concurrent.Executors
 
 class AntigravityWebViewClient(
     private val context: Context,
-    private val prefs: PreferencesManager,
     private val onPageStartedCallback: (String) -> Unit,
     private val onPageFinishedCallback: (String) -> Unit,
     private val onErrorCallback: (String) -> Unit,
@@ -37,12 +36,12 @@ class AntigravityWebViewClient(
             return true
         }
 
-        // Allow Antigravity and Google Auth domains in-app
+        // Keep all Antigravity and Google auth domains inside our in-app WebView
         if (isInternalDomain(host)) {
             return false
         }
 
-        // External links open in system browser
+        // For strictly external 3rd-party sites (e.g. GitHub, external docs), open in browser
         try {
             val intent = Intent(Intent.ACTION_VIEW, uri)
             context.startActivity(intent)
@@ -62,16 +61,11 @@ class AntigravityWebViewClient(
         if (url != null) {
             onPageFinishedCallback(url)
             
-            // Persist cookies to disk in background without blocking UI
+            // Persist cookies to disk in background so sessions never drop
             backgroundExecutor.execute {
                 try {
                     CookieManager.getInstance().flush()
                 } catch (_: Exception) {}
-            }
-
-            // Handle Account Chooser automation on accounts.google.com
-            if (url.contains("accounts.google.com")) {
-                injectAccountAutoSelector(view)
             }
         }
     }
@@ -93,69 +87,16 @@ class AntigravityWebViewClient(
         return true
     }
 
-    private fun injectAccountAutoSelector(view: WebView?) {
-        val preferred = prefs.preferredEmail.replace("\"", "\\\"")
-        val autoSkip = prefs.autoSkipAccountChooser
-
-        val script = """
-            (function() {
-                var preferred = "$preferred";
-                var autoSkip = $autoSkip;
-
-                function attachListeners() {
-                    var items = document.querySelectorAll('[data-identifier], [data-email], li[role="link"]');
-                    for (var i = 0; i < items.length; i++) {
-                        (function(el) {
-                            el.addEventListener('click', function() {
-                                var id = el.getAttribute('data-identifier') || el.getAttribute('data-email') || el.innerText;
-                                if (id && id.indexOf('@') !== -1 && window.AntigravityNative) {
-                                    window.AntigravityNative.onAccountSelected(id.trim());
-                                }
-                            });
-                        })(items[i]);
-                    }
-                }
-                attachListeners();
-
-                if (!autoSkip) return;
-
-                setTimeout(function() {
-                    if (preferred && preferred.length > 3) {
-                        var match = document.querySelector('[data-identifier="' + preferred + '"], [data-email="' + preferred + '"]');
-                        if (match) {
-                            match.click();
-                            return;
-                        }
-                        var all = document.querySelectorAll('li, div[role="button"]');
-                        for (var j = 0; j < all.length; j++) {
-                            if (all[j].textContent && all[j].textContent.indexOf(preferred) !== -1) {
-                                all[j].click();
-                                return;
-                            }
-                        }
-                    } else {
-                        var accounts = document.querySelectorAll('[data-identifier], [data-email]');
-                        if (accounts.length === 1) {
-                            var email = accounts[0].getAttribute('data-identifier') || accounts[0].getAttribute('data-email');
-                            if (email && window.AntigravityNative) {
-                                window.AntigravityNative.onAccountSelected(email);
-                            }
-                            accounts[0].click();
-                        }
-                    }
-                }, 250);
-            })();
-        """.trimIndent()
-
-        view?.evaluateJavascript(script, null)
-    }
-
     private fun isInternalDomain(host: String): Boolean {
-        if (host == "antigravity.google" || host.endsWith(".antigravity.google")) return true
-        if (host == "antigravity.google.com" || host.endsWith(".antigravity.google.com")) return true
-        if (host == "google.com" || host.endsWith(".google.com")) return true
-        if (host == "gstatic.com" || host.endsWith(".gstatic.com")) return true
-        if (host == "googleusercontent.com" || host.endsWith(".googleusercontent.com")) return true
+        val h = host.lowercase()
+        if (h == "antigravity.google" || h.endsWith(".antigravity.google")) return true
+        if (h == "antigravity.google.com" || h.endsWith(".antigravity.google.com")) return true
+        if (h == "google.com" || h.endsWith(".google.com")) return true
+        if (h.contains(".google.")) return true
+        if (h == "gstatic.com" || h.endsWith(".gstatic.com")) return true
+        if (h == "googleusercontent.com" || h.endsWith(".googleusercontent.com")) return true
+        if (h == "googleapis.com" || h.endsWith(".googleapis.com")) return true
+        if (h == "youtube.com" || h.endsWith(".youtube.com")) return true
         return false
     }
 }
