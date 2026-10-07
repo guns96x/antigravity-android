@@ -14,6 +14,14 @@ class PreferencesManager(context: Context) {
         get() = prefs.getString(KEY_PREFERRED_EMAIL, "") ?: ""
         set(value) = prefs.edit().putString(KEY_PREFERRED_EMAIL, value.trim()).apply()
 
+    var authUserIndex: Int
+        get() = prefs.getInt(KEY_AUTH_USER_INDEX, 0)
+        set(value) = prefs.edit().putInt(KEY_AUTH_USER_INDEX, value).apply()
+
+    var autoLaunchOnOpen: Boolean
+        get() = prefs.getBoolean(KEY_AUTO_LAUNCH, false)
+        set(value) = prefs.edit().putBoolean(KEY_AUTO_LAUNCH, value).apply()
+
     var isDesktopMode: Boolean
         get() = prefs.getBoolean(KEY_DESKTOP_MODE, false)
         set(value) = prefs.edit().putBoolean(KEY_DESKTOP_MODE, value).apply()
@@ -31,7 +39,6 @@ class PreferencesManager(context: Context) {
         set(value) = prefs.edit().putBoolean(KEY_PROMPTED_PICKER, value).apply()
 
     fun clearSession() {
-        // Keep user configuration but clear preferred email if needed
         prefs.edit().remove(KEY_PREFERRED_EMAIL).apply()
     }
 
@@ -41,6 +48,8 @@ class PreferencesManager(context: Context) {
 
         private const val KEY_CANONICAL_URL = "canonical_url"
         private const val KEY_PREFERRED_EMAIL = "preferred_email"
+        private const val KEY_AUTH_USER_INDEX = "auth_user_index"
+        private const val KEY_AUTO_LAUNCH = "auto_launch"
         private const val KEY_DESKTOP_MODE = "desktop_mode"
         private const val KEY_KEEP_AWAKE = "keep_awake"
         private const val KEY_AUTO_SKIP_CHOOSER = "auto_skip_chooser"
