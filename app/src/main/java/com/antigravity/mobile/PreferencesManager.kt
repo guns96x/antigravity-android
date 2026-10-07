@@ -26,6 +26,10 @@ class PreferencesManager(context: Context) {
         get() = prefs.getBoolean(KEY_AUTO_SKIP_CHOOSER, true)
         set(value) = prefs.edit().putBoolean(KEY_AUTO_SKIP_CHOOSER, value).apply()
 
+    var hasPromptedAccountPicker: Boolean
+        get() = prefs.getBoolean(KEY_PROMPTED_PICKER, false)
+        set(value) = prefs.edit().putBoolean(KEY_PROMPTED_PICKER, value).apply()
+
     fun clearSession() {
         // Keep user configuration but clear preferred email if needed
         prefs.edit().remove(KEY_PREFERRED_EMAIL).apply()
@@ -40,5 +44,6 @@ class PreferencesManager(context: Context) {
         private const val KEY_DESKTOP_MODE = "desktop_mode"
         private const val KEY_KEEP_AWAKE = "keep_awake"
         private const val KEY_AUTO_SKIP_CHOOSER = "auto_skip_chooser"
+        private const val KEY_PROMPTED_PICKER = "prompted_picker"
     }
 }

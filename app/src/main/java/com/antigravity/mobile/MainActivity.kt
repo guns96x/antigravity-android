@@ -43,6 +43,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 class MainActivity : ComponentActivity() {
 
     private var filePathCallback: ValueCallback<Array<Uri>>? = null
+    private var onAccountSelectedCallback: ((String) -> Unit)? = null
 
     companion object {
         const val MOBILE_USER_AGENT =
@@ -76,9 +77,31 @@ class MainActivity : ComponentActivity() {
                     }
                     filePickerLauncher.launch(intent)
                     true
+                },
+                onPickAccountFromDevice = { onSelected ->
+                    onAccountSelectedCallback = onSelected
+                    try {
+                        val pickIntent = AccountPickerHelper.createChooseAccountIntent(prefs.preferredEmail)
+                        accountPickerLauncher.launch(pickIntent)
+                    } catch (e: Exception) {
+                        Toast.makeText(this, "Помилка виклику вибору акаунта: ${e.message}", Toast.LENGTH_SHORT).show()
+                    }
                 }
             )
         }
+    }
+
+    private val accountPickerLauncher = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val email = result.data?.getStringExtra(android.accounts.AccountManager.KEY_ACCOUNT_NAME)
+            if (!email.isNullOrBlank()) {
+                onAccountSelectedCallback?.invoke(email)
+                Toast.makeText(this, "Акаунт підхоплено: $email", Toast.LENGTH_SHORT).show()
+            }
+        }
+        onAccountSelectedCallback = null
     }
 
     private val filePickerLauncher = registerForActivityResult(
@@ -101,7 +124,8 @@ class MainActivity : ComponentActivity() {
 fun AntigravityScreen(
     prefs: PreferencesManager,
     onSetKeepScreenOn: (Boolean) -> Unit,
-    onOpenFileChooser: (ValueCallback<Array<Uri>>?, WebChromeClient.FileChooserParams?) -> Boolean
+    onOpenFileChooser: (ValueCallback<Array<Uri>>?, WebChromeClient.FileChooserParams?) -> Boolean,
+    onPickAccountFromDevice: (((String) -> Unit) -> Unit)
 ) {
     val context = LocalContext.current
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
@@ -115,6 +139,16 @@ fun AntigravityScreen(
 
     LaunchedEffect(keepScreenAwake) {
         onSetKeepScreenOn(keepScreenAwake)
+    }
+
+    // Auto prompt system account picker on first run if email not set
+    LaunchedEffect(Unit) {
+        if (prefs.preferredEmail.isBlank() && !prefs.hasPromptedAccountPicker) {
+            prefs.hasPromptedAccountPicker = true
+            onPickAccountFromDevice { picked ->
+                prefs.preferredEmail = picked
+            }
+        }
     }
 
     // Double back to exit handler
@@ -349,6 +383,20 @@ fun AntigravityScreen(
                         fontSize = 12.sp,
                         color = Color(0xFF9CA3AF)
                     )
+
+                    Button(
+                        onClick = {
+                            onPickAccountFromDevice { picked ->
+                                emailInput = picked
+                                prefs.preferredEmail = picked
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                        border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF3B82F6)),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("📱 Підхопити акаунт з телефона", color = Color(0xFF60A5FA), fontWeight = FontWeight.SemiBold)
+                    }
 
                     OutlinedTextField(
                         value = emailInput,
